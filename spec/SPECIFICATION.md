@@ -17,14 +17,32 @@ Enable OpenCody mobile app users to receive push notifications when events occur
 - **Cross-platform ready** - Android now, iOS architecture ready
 - **Privacy-first** - Minimal data exposure
 
-### 1.3 Non-Goals (v1)
+### 1.3 Scope (v1)
 
+**In Scope:**
+- `session.created` notifications only
+
+**Out of Scope (v1):**
 - Offline session viewing
 - Message sync/storage
 - Multi-user/team features
 - Session control from notifications
 - Multiple paired devices per CLI
 - iOS push notifications (requires Apple Developer Account)
+- Session idle/error/permission notifications (deferred to v1.1)
+
+### 1.4 Notification Filtering
+
+Since OpenCode does not include origin/client information in events, the mobile app cannot distinguish sessions created remotely vs locally based on the event payload alone.
+
+**Solution:** The mobile app suppresses notifications for sessions that are currently active in the app. If the user is viewing or interacting with a session, notifications for that session are not shown.
+
+| Scenario | Notification Shown? |
+|----------|---------------------|
+| Session created while app is in background | Yes |
+| Session created while app is in foreground, different session active | Yes |
+| Session created while app is in foreground, that session is active | No |
+| Session created by user in mobile app | No (session becomes active immediately) |
 
 ---
 
@@ -236,9 +254,6 @@ OpenCode URL: http://localhost:3000
 Paired Device: Pixel 8
 Events Enabled:
   - Session created: ✓
-  - Session idle: ✓
-  - Session error: ✓
-  - Permission requested: ✓
 ```
 
 #### `opencody-relay unpair`
@@ -294,24 +309,86 @@ Location: `~/.config/opencody/relay.config.json`
     "pairedAt": "2026-01-05T12:00:00.000Z"
   },
   "events": {
-    "sessionCreated": true,
-    "sessionIdle": true,
-    "sessionError": true,
-    "permissionRequested": true
+    "sessionCreated": true
   }
 }
 ```
 
 ### 4.4 OpenCode Events
 
+#### V1 Events (session.created only)
+
 | OpenCode Event | Trigger | Notification |
 |----------------|---------|--------------|
 | `session.created` | New session starts | Title: "New Session", Body: "{session title}" |
+
+#### V1.1 Events (future)
+
+| OpenCode Event | Trigger | Notification |
+|----------------|---------|--------------|
 | `session.idle` | Session completes | Title: "Session Complete", Body: "{session title}" |
 | `session.error` | Session errors | Title: "Session Error", Body: "{session title}" |
 | `message.part.updated` | Permission requested | Title: "Permission Needed", Body: "{tool} wants to {action}" |
 
-### 4.5 Expo Push API Integration
+### 4.5 OpenCode SSE Event Structure
+
+The CLI subscribes to `GET /global/event` which returns events in the following format:
+
+```typescript
+interface GlobalEvent {
+  directory: string;  // OpenCode instance directory
+  payload: {
+    type: string;
+    properties: Record<string, unknown>;
+  };
+}
+
+// Example: session.created event
+{
+  "directory": "/Users/dev/my-project",
+  "payload": {
+    "type": "session.created",
+    "properties": {
+      "info": {
+        "id": "ses_abc123",
+        "projectID": "proj_xyz",
+        "directory": "/Users/dev/my-project",
+        "title": "Fix login bug",
+        "version": "1.0.0",
+        "time": {
+          "created": 1704456000,
+          "updated": 1704456000
+        }
+      }
+    }
+  }
+}
+```
+
+### 4.6 Encrypted Notification Payload
+
+The CLI encrypts the following payload before sending via Expo Push:
+
+```typescript
+interface NotificationPayload {
+  type: 'session.created';
+  sessionId: string;
+  title: string;
+  directory: string;
+  timestamp: number;
+}
+
+// Example
+{
+  "type": "session.created",
+  "sessionId": "ses_abc123",
+  "title": "Fix login bug",
+  "directory": "/Users/dev/my-project",
+  "timestamp": 1704456000
+}
+```
+
+### 4.7 Expo Push API Integration
 
 ```typescript
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
@@ -343,7 +420,7 @@ async function sendPush(message: ExpoPushMessage): Promise<boolean> {
 }
 ```
 
-### 4.6 Project Structure
+### 4.8 Project Structure
 
 ```
 opencody-relay/
@@ -369,7 +446,7 @@ opencody-relay/
 └── README.md
 ```
 
-### 4.7 Dependencies
+### 4.9 Dependencies
 
 ```json
 {
@@ -441,11 +518,13 @@ interface PushState {
   expoPushToken: string | null;
   publicKey: string | null;
   isPaired: boolean;
+  activeSessionId: string | null;  // Currently viewed/active session
   
   setEnabled: (enabled: boolean) => void;
   setExpoPushToken: (token: string) => void;
   setPublicKey: (key: string) => void;
   setIsPaired: (paired: boolean) => void;
+  setActiveSessionId: (sessionId: string | null) => void;
   reset: () => void;
 }
 
@@ -456,21 +535,31 @@ export const usePushStore = create<PushState>()(
       expoPushToken: null,
       publicKey: null,
       isPaired: false,
+      activeSessionId: null,
       
       setEnabled: (enabled) => set({ enabled }),
       setExpoPushToken: (token) => set({ expoPushToken: token }),
       setPublicKey: (key) => set({ publicKey: key }),
       setIsPaired: (paired) => set({ isPaired: paired }),
+      setActiveSessionId: (sessionId) => set({ activeSessionId: sessionId }),
       reset: () => set({
         enabled: false,
         expoPushToken: null,
         publicKey: null,
         isPaired: false,
+        activeSessionId: null,
       }),
     }),
     {
       name: 'push-storage',
       storage: createJSONStorage(() => AsyncStorage),
+      // Don't persist activeSessionId - it's runtime state only
+      partialize: (state) => ({
+        enabled: state.enabled,
+        expoPushToken: state.expoPushToken,
+        publicKey: state.publicKey,
+        isPaired: state.isPaired,
+      }),
     }
   )
 );
@@ -582,20 +671,50 @@ export function getDeviceName(): string {
 // services/push/handler.ts
 import * as Notifications from 'expo-notifications';
 import { decryptPayload } from './encryption';
+import { usePushStore } from '../../stores/pushStore';
 
 interface DecryptedNotification {
-  type: 'session.created' | 'session.idle' | 'session.error' | 'permission.requested';
+  type: 'session.created';
   sessionId: string;
   title: string;
+  directory: string;
   timestamp: number;
 }
 
+// Configure notification handler with active session filtering
 Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
+  handleNotification: async (notification) => {
+    const data = notification.request.content.data;
+    
+    // Try to decrypt and check if this is for the active session
+    if (data?.encrypted && data?.nonce && data?.ephemeralPublicKey) {
+      const decrypted = await decryptPayload(
+        data.encrypted as string,
+        data.nonce as string,
+        data.ephemeralPublicKey as string
+      ) as DecryptedNotification | null;
+      
+      if (decrypted) {
+        const activeSessionId = usePushStore.getState().activeSessionId;
+        
+        // Suppress notification if this session is currently active in the app
+        if (activeSessionId && decrypted.sessionId === activeSessionId) {
+          return {
+            shouldShowAlert: false,
+            shouldPlaySound: false,
+            shouldSetBadge: false,
+          };
+        }
+      }
+    }
+    
+    // Show notification normally
+    return {
+      shouldShowAlert: true,
+      shouldPlaySound: true,
+      shouldSetBadge: false,
+    };
+  },
 });
 
 export function setupPushHandler(onNotificationTap?: (sessionId: string) => void) {
@@ -627,7 +746,40 @@ export async function handleIncomingPush(
 }
 ```
 
-### 5.7 Pairing Code Generation
+### 5.7 Active Session Tracking
+
+The mobile app must track which session is currently active to suppress duplicate notifications.
+
+```typescript
+// Example: In session view component or navigation
+import { usePushStore } from '../stores/pushStore';
+import { useEffect } from 'react';
+
+function useTrackActiveSession(sessionId: string | null) {
+  const setActiveSessionId = usePushStore((state) => state.setActiveSessionId);
+  
+  useEffect(() => {
+    setActiveSessionId(sessionId);
+    
+    // Clear when unmounting or navigating away
+    return () => setActiveSessionId(null);
+  }, [sessionId, setActiveSessionId]);
+}
+
+// Usage in SessionScreen
+function SessionScreen({ route }) {
+  const { sessionId } = route.params;
+  
+  // Track this session as active - notifications for it will be suppressed
+  useTrackActiveSession(sessionId);
+  
+  // ... rest of component
+}
+```
+
+**Important:** When a user creates a new session in the mobile app, the session becomes active immediately (before the push notification arrives), so the notification is automatically suppressed.
+
+### 5.8 Pairing Code Generation
 
 ```typescript
 // services/push/index.ts
@@ -770,53 +922,63 @@ eyJ2IjoxLCJ0IjoiRXhwb25lbnRQdXNoVG9rZW5bYWJjMTIzXSIsInBrIjoiTUZrd0V3WUhLb1pJemow
 | Permission denied | Show explanation, link to settings |
 | Decryption failed | Log silently, don't show notification |
 | Invalid push data | Ignore silently |
+| Active session match | Suppress notification (expected behavior) |
 
 ---
 
 ## 9. Implementation Phases
 
-### Phase 1: CLI Foundation (4-5 hours)
+### Phase 1: CLI Foundation
 - Project setup (TypeScript, tsup)
 - Config file management
 - Commander CLI structure
 - Basic commands: `pair`, `status`, `unpair`
 
-### Phase 2: CLI Core Features (4-5 hours)
-- OpenCode SSE client
-- Event filtering
+### Phase 2: CLI Core Features
+- OpenCode SSE client (`/global/event` endpoint)
+- `session.created` event handling only (v1 scope)
 - Encryption implementation
 - Expo Push API client
 - `start` and `test` commands
 
-### Phase 3: Mobile Foundation (3-4 hours)
+### Phase 3: Mobile Foundation
 - Add dependencies
 - Push registration service
 - Permission handling
 - Expo push token retrieval
 
-### Phase 4: Mobile Encryption (2-3 hours)
+### Phase 4: Mobile Encryption
 - Keypair generation
 - Secure storage
 - Decryption handler
 - Pairing code generation
 
-### Phase 5: Mobile UI (2-3 hours)
+### Phase 5: Mobile UI & Filtering
 - Push settings section in Settings screen
 - Pairing flow UI
 - Copy pairing code functionality
 - Status display
+- Active session tracking (`activeSessionId` in store)
+- Notification suppression for active sessions
 
-### Phase 6: Integration Testing (2-3 hours)
+### Phase 6: Integration Testing
 - End-to-end pairing test
 - Notification delivery test
+- Active session suppression test
 - Error case handling
 - Documentation
-
-**Total Estimated: 17-23 hours (~2-3 days)**
 
 ---
 
 ## 10. Future Considerations
+
+### Version 1.1
+
+- Additional event types:
+  - `session.idle` - Session completes
+  - `session.error` - Session errors  
+  - `permission.requested` - Tool permission needed
+- Configurable event filtering in CLI
 
 ### Version 2
 

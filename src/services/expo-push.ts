@@ -4,11 +4,9 @@ import type { EncryptedPayload } from "./encryption.js";
 const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 
 export interface NotificationPayload {
-  type: "session.created";
-  sessionId: string;
   title: string;
-  directory: string;
-  timestamp: number;
+  body: string;
+  deeplink?: string;
 }
 
 interface ExpoPushMessage {

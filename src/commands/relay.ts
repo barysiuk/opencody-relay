@@ -1,16 +1,16 @@
 import { loadConfig } from "../config/index.js";
 import { log, setVerbose } from "../utils/logger.js";
 import { OpenCodeClient, type GlobalEvent, type SessionInfo } from "../services/opencode.js";
-import { encryptPayload } from "../services/encryption.js";
-import { sendPushNotification, type NotificationPayload } from "../services/expo-push.js";
+import { sendNotification } from "../services/notification.js";
+import { VERSION } from "../version.js";
 import pc from "picocolors";
 
-interface StartOptions {
+interface RelayOptions {
   opencodeUrl?: string;
   verbose?: boolean;
 }
 
-export async function startCommand(options: StartOptions): Promise<void> {
+export async function relayCommand(options: RelayOptions): Promise<void> {
   const config = loadConfig();
 
   if (options.verbose) {
@@ -25,7 +25,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
 
   const opencodeUrl = options.opencodeUrl || config.opencode.url;
 
-  log.header(`OpenCody Relay v0.0.1`);
+  log.header(`OpenCody Relay v${VERSION}`);
   log.info(`OpenCode: ${opencodeUrl}`);
   log.info(`Device:   ${config.device.name}`);
   log.blank();
@@ -53,7 +53,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
   });
 
   client.setEventHandler(async (event: GlobalEvent) => {
-    await handleEvent(event, config.device!, config.events);
+    await handleEvent(event, config.events);
   });
 
   // Handle graceful shutdown
@@ -74,7 +74,6 @@ export async function startCommand(options: StartOptions): Promise<void> {
 
 async function handleEvent(
   event: GlobalEvent,
-  device: { name: string; token: string; publicKey: string },
   eventsConfig: { sessionCreated: boolean }
 ): Promise<void> {
   const { type, properties } = event.payload;
@@ -87,23 +86,12 @@ async function handleEvent(
 
     log.event("Session created", title);
 
-    const payload: NotificationPayload = {
-      type: "session.created",
-      sessionId: info.id,
-      title,
-      directory: event.directory,
-      timestamp: info.time.created,
-    };
+    const result = await sendNotification({
+      title: "New Session",
+      body: title,
+    });
 
-    const encrypted = encryptPayload(payload, device.publicKey);
-    const success = await sendPushNotification(
-      device.token,
-      "New Session",
-      title,
-      encrypted
-    );
-
-    if (success) {
+    if (result.success) {
       log.arrow("Notification sent");
     } else {
       log.arrow(pc.red("Notification failed"));

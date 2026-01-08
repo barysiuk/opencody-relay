@@ -58,6 +58,13 @@ export class OpenCodeClient {
   }
 
   connect(): void {
+    // Close any existing connection before creating a new one
+    // This prevents duplicate EventSource instances from accumulating
+    if (this.eventSource) {
+      this.eventSource.close();
+      this.eventSource = null;
+    }
+
     const url = `${this.baseUrl}/global/event`;
     log.verbose(`Connecting to ${url}`);
 

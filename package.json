@@ -1,6 +1,6 @@
 {
   "name": "opencody-relay",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Push notification relay for OpenCody mobile app",
   "type": "module",
   "bin": {

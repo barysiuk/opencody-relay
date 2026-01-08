@@ -2,16 +2,18 @@ import { Command } from "commander";
 import { pairCommand } from "./commands/pair.js";
 import { unpairCommand } from "./commands/unpair.js";
 import { statusCommand } from "./commands/status.js";
-import { startCommand } from "./commands/start.js";
+import { relayCommand } from "./commands/relay.js";
+import { notifyCommand } from "./commands/notify.js";
 import { testCommand } from "./commands/test.js";
 import { configSetCommand } from "./commands/config.js";
+import { VERSION } from "./version.js";
 
 const program = new Command();
 
 program
   .name("opencody-relay")
   .description("Push notification relay for OpenCody mobile app")
-  .version("0.0.1");
+  .version(VERSION);
 
 program
   .command("pair")
@@ -29,11 +31,17 @@ program
   .action(statusCommand);
 
 program
-  .command("start")
-  .description("Start the relay service")
+  .command("relay")
+  .description("Relay events from OpenCode to mobile app")
   .option("-u, --opencode-url <url>", "Override OpenCode URL")
   .option("-v, --verbose", "Show detailed logs")
-  .action(startCommand);
+  .action(relayCommand);
+
+program
+  .command("notify <title> <body>")
+  .description("Send a direct push notification")
+  .option("-d, --deeplink <url>", "Deeplink URL for the notification")
+  .action(notifyCommand);
 
 program
   .command("test")

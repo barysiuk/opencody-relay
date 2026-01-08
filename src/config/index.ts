@@ -29,7 +29,7 @@ const DEFAULT_CONFIG: Config = {
   },
   device: null,
   events: {
-    sessionCreated: true,
+    sessionCreated: false,
   },
 };
 
